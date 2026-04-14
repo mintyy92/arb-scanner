@@ -79,9 +79,6 @@ HTML = """
         .warn {
             color: #ffd54f;
         }
-        .muted {
-            color: #bbb;
-        }
         .offer {
             margin-top: 8px;
             padding-top: 8px;
@@ -144,12 +141,12 @@ def best_link(outcome_link, market_link, bookmaker_link):
     return outcome_link or market_link or bookmaker_link or None
 
 def get_events():
+    # Broad discovery: do NOT filter by AU bookmakers here
     url = f"https://api.the-odds-api.com/v4/sports/{SPORT}/odds/"
     params = {
         "apiKey": API_KEY,
-        "regions": REGIONS,
+        "regions": "us",       # broad discovery so we actually get NBA events
         "markets": "h2h",
-        "bookmakers": ",".join(BOOKMAKERS),
         "oddsFormat": "decimal",
     }
 
@@ -235,7 +232,7 @@ def home():
         debug_events.append({
             "match": match_name,
             "bookmaker_count": len(bookmakers),
-            "offers": offers[:50],  # keep page usable
+            "offers": offers[:50],
         })
 
     summary = {
