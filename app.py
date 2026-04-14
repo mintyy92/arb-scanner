@@ -6,12 +6,15 @@ import threading
 app = Flask(__name__)
 
 API_KEY = os.environ.get("ODDS_API_KEY")
+SPORT = "basketball_nba"
+REGIONS = "au"
+MARKET = "player_points"
 
-SPORTS = [
-    "soccer_epl",
-    "basketball_nba",
-    "australianrules_afl",
-    "rugbyleague_nrl"
+BOOKMAKERS = [
+    "sportsbet",
+    "pointsbetau",
+    "ladbrokes_au",
+    "neds",
 ]
 
 results = []
@@ -21,91 +24,213 @@ HTML = """
 <!DOCTYPE html>
 <html>
 <head>
-    <title>Fast Arbitrage Scanner</title>
+    <title>NBA Player Points Scanner</title>
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <meta http-equiv="refresh" content="10">
+    <meta http-equiv="refresh" content="20">
     <style>
-        body { font-family: Arial; background: #111; color: #fff; padding: 15px; }
-        h1 { text-align: center; }
-        .card { background:#1e1e1e; padding:15px; margin:10px 0; border-radius:10px; }
-        .profit { color:#00ff99; font-weight:bold; }
-        .sport { color:#aaa; font-size:12px; }
+        body { font-family: Arial, sans-serif; background: #111; color: #fff; padding: 16px; }
+        h1 { text-align: center; margin-bottom: 20px; }
+        .card { background: #1b1b1b; padding: 16px; margin: 12px 0; border-radius: 12px; }
+        .profit { color: #00ff99; font-weight: bold; }
+        .near { color: #ffd54f; font-weight: bold; }
+        .subtle { color: #aaa; font-size: 12px; }
+        .line { margin: 6px 0; }
+        .book { color: #7cc4ff; font-weight: bold; }
+        a { color: #7cc4ff; }
+        .status-arb { color: #00ff99; font-weight: bold; }
+        .status-near { color: #ffd54f; font-weight: bold; }
     </style>
 </head>
 <body>
-    <h1>⚡ Multi-Sport Arbitrage Scanner</h1>
+    <h1>🏀 NBA Player Points Scanner</h1>
 
-    {% for arb in arbs %}
+    {% if arbs %}
+        {% for arb in arbs %}
+            <div class="card">
+                <div class="subtle">{{ arb.match }}</div>
+                <h3>{{ arb.player }} — {{ arb.line_value }} Points</h3>
+
+                <div class="line">
+                    <span class="book">Over</span>:
+                    {{ arb.over_odds }} at {{ arb.over_bookmaker }}
+                    {% if arb.over_link %}
+                        — <a href="{{ arb.over_link }}" target="_blank">Open</a>
+                    {% endif %}
+                </div>
+
+                <div class="line">
+                    <span class="book">Under</span>:
+                    {{ arb.under_odds }} at {{ arb.under_bookmaker }}
+                    {% if arb.under_link %}
+                        — <a href="{{ arb.under_link }}" target="_blank">Open</a>
+                    {% endif %}
+                </div>
+
+                {% if arb.status == "ARB" %}
+                    <div class="line status-arb">Status: ARB</div>
+                    <div class="line profit">Margin: {{ arb.profit_pct }}%</div>
+                {% else %}
+                    <div class="line status-near">Status: NEAR ARB</div>
+                    <div class="line near">Margin: {{ arb.profit_pct }}%</div>
+                {% endif %}
+
+                <div class="line">
+                    Bet split: Over {{ arb.over_bet_pct }}% / Under {{ arb.under_bet_pct }}%
+                </div>
+            </div>
+        {% endfor %}
+    {% else %}
         <div class="card">
-            <div class="sport">{{ arb.sport }}</div>
-            <h3>{{ arb.match }}</h3>
-            <p>{{ arb.odds }}</p>
-            <p class="profit">Profit: {{ arb.profit }}%</p>
+            <p>No NBA player points arbs or near arbs found right now.</p>
         </div>
-    {% endfor %}
+    {% endif %}
 </body>
 </html>
 """
 
-def fetch_sport(sport):
-    url = f"https://api.the-odds-api.com/v4/sports/{sport}/odds/"
+def best_link(outcome_link, market_link, bookmaker_link):
+    return outcome_link or market_link or bookmaker_link or None
+
+def get_events():
+    url = f"https://api.the-odds-api.com/v4/sports/{SPORT}/odds/"
     params = {
         "apiKey": API_KEY,
-        "regions": "au",
-        "markets": "h2h"
+        "regions": REGIONS,
+        "markets": "h2h",
+        "bookmakers": ",".join(BOOKMAKERS),
+        "oddsFormat": "decimal",
     }
+    response = requests.get(url, params=params, timeout=10)
+    data = response.json()
+    return data if isinstance(data, list) else []
 
-    try:
-        data = requests.get(url, params=params, timeout=5).json()
+def get_event_props(event_id):
+    url = f"https://api.the-odds-api.com/v4/sports/{SPORT}/events/{event_id}/odds"
+    params = {
+        "apiKey": API_KEY,
+        "regions": REGIONS,
+        "markets": MARKET,
+        "bookmakers": ",".join(BOOKMAKERS),
+        "oddsFormat": "decimal",
+        "includeLinks": "true",
+    }
+    response = requests.get(url, params=params, timeout=10)
+    data = response.json()
+    return data if isinstance(data, dict) else {}
 
-        if not isinstance(data, list):
-            return
+def calc_split(over_odds, under_odds):
+    inv_over = 1 / over_odds
+    inv_under = 1 / under_odds
+    total = inv_over + inv_under
 
-        for event in data:
-            best_odds = {}
+    over_pct = round((inv_over / total) * 100, 2)
+    under_pct = round((inv_under / total) * 100, 2)
+    profit_pct = round((1 - total) * 100, 2)
 
-            for bookmaker in event.get("bookmakers", []):
-                for market in bookmaker.get("markets", []):
-                    for outcome in market.get("outcomes", []):
-                        name = outcome["name"]
-                        price = outcome["price"]
+    return over_pct, under_pct, profit_pct, total
 
-                        if name not in best_odds or price > best_odds[name]:
-                            best_odds[name] = price
+def process_event(event):
+    event_id = event.get("id")
+    if not event_id:
+        return
 
-            if len(best_odds) == 2:
-                odds = list(best_odds.values())
+    props_data = get_event_props(event_id)
+    bookmakers = props_data.get("bookmakers", [])
+    match_name = f"{event.get('away_team', 'Away')} vs {event.get('home_team', 'Home')}"
 
-                if any(o < 1.2 or o > 20 for o in odds):
+    grouped = {}
+
+    for bookmaker in bookmakers:
+        bookmaker_title = bookmaker.get("title", bookmaker.get("key", "Unknown"))
+        bookmaker_link = bookmaker.get("link")
+
+        for market in bookmaker.get("markets", []):
+            if market.get("key") != MARKET:
+                continue
+
+            market_link = market.get("link")
+
+            for outcome in market.get("outcomes", []):
+                player = outcome.get("description")
+                side = outcome.get("name")
+                point = outcome.get("point")
+                price = outcome.get("price")
+                outcome_link = outcome.get("link")
+
+                if not player or side not in ("Over", "Under") or point is None or not price:
                     continue
 
-                total = (1 / odds[0]) + (1 / odds[1])
+                if price < 1.2 or price > 10:
+                    continue
 
-                if total < 0.99:
-                    profit = round((1 - total) * 100, 2)
+                key = (player, point)
+                if key not in grouped:
+                    grouped[key] = {"Over": None, "Under": None}
 
-                    if profit < 1 or profit > 10:
-                        continue
+                current = grouped[key][side]
+                candidate = {
+                    "price": price,
+                    "bookmaker": bookmaker_title,
+                    "link": best_link(outcome_link, market_link, bookmaker_link),
+                }
 
-                    with lock:
-                        results.append({
-                            "sport": sport,
-                            "match": f"{event['home_team']} vs {event['away_team']}",
-                            "odds": best_odds,
-                            "profit": profit
-                        })
+                if current is None or price > current["price"]:
+                    grouped[key][side] = candidate
 
-    except Exception:
-        pass
+    local_results = []
+
+    for (player, point), sides in grouped.items():
+        over_data = sides["Over"]
+        under_data = sides["Under"]
+
+        if not over_data or not under_data:
+            continue
+
+        if over_data["bookmaker"] == under_data["bookmaker"]:
+            continue
+
+        over_pct, under_pct, profit_pct, total = calc_split(
+            over_data["price"],
+            under_data["price"]
+        )
+
+        status = None
+        if total < 1:
+            status = "ARB"
+        elif total <= 1.02:
+            status = "NEAR ARB"
+
+        if status:
+            local_results.append({
+                "match": match_name,
+                "player": player,
+                "line_value": point,
+                "over_odds": over_data["price"],
+                "under_odds": under_data["price"],
+                "over_bookmaker": over_data["bookmaker"],
+                "under_bookmaker": under_data["bookmaker"],
+                "over_link": over_data["link"],
+                "under_link": under_data["link"],
+                "over_bet_pct": over_pct,
+                "under_bet_pct": under_pct,
+                "profit_pct": round(profit_pct, 2),
+                "status": status,
+            })
+
+    local_results.sort(key=lambda x: x["profit_pct"], reverse=True)
+
+    with lock:
+        results.extend(local_results)
 
 def scan_all():
     global results
     results = []
 
+    events = get_events()
     threads = []
 
-    for sport in SPORTS:
-        t = threading.Thread(target=fetch_sport, args=(sport,))
+    for event in events:
+        t = threading.Thread(target=process_event, args=(event,))
         t.start()
         threads.append(t)
 
