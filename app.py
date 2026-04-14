@@ -6,7 +6,7 @@ app = Flask(__name__)
 
 API_KEY = os.environ.get("ODDS_API_KEY")
 SPORT = "basketball_nba"
-REGIONS = "au"
+REGIONS = "us"
 
 BOOKMAKERS = [
     "sportsbet",
