@@ -8,12 +8,8 @@ app = Flask(__name__)
 API_KEY = os.environ.get("ODDS_API_KEY")
 REGIONS = "au"
 
-BOOKMAKERS = [
-    "sportsbet",
-    "pointsbetau",
-    "ladbrokes_au",
-    "neds",
-]
+if bookmaker_title.lower() not in ["sportsbet", "pointsbet", "ladbrokes", "neds"]:
+    continue
 
 SPORTS = [
     ("basketball_nba", "NBA"),
