@@ -8,7 +8,6 @@ app = Flask(__name__)
 API_KEY = os.environ.get("ODDS_API_KEY")
 SPORT = "basketball_nba"
 REGIONS = "au"
-MARKET = "player_points"
 
 BOOKMAKERS = [
     "sportsbet",
@@ -17,6 +16,24 @@ BOOKMAKERS = [
     "neds",
 ]
 
+MARKETS = [
+    "player_points",
+    "player_rebounds",
+    "player_assists",
+    "player_threes",
+    "player_steals",
+    "player_blocks",
+]
+
+MARKET_LABELS = {
+    "player_points": "Points",
+    "player_rebounds": "Rebounds",
+    "player_assists": "Assists",
+    "player_threes": "Threes",
+    "player_steals": "Steals",
+    "player_blocks": "Blocks",
+}
+
 results = []
 lock = threading.Lock()
 
@@ -24,31 +41,85 @@ HTML = """
 <!DOCTYPE html>
 <html>
 <head>
-    <title>NBA Player Points Scanner</title>
+    <title>NBA Player Props Scanner</title>
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <meta http-equiv="refresh" content="20">
     <style>
-        body { font-family: Arial, sans-serif; background: #111; color: #fff; padding: 16px; }
-        h1 { text-align: center; margin-bottom: 20px; }
-        .card { background: #1b1b1b; padding: 16px; margin: 12px 0; border-radius: 12px; }
-        .profit { color: #00ff99; font-weight: bold; }
-        .near { color: #ffd54f; font-weight: bold; }
-        .subtle { color: #aaa; font-size: 12px; }
-        .line { margin: 6px 0; }
-        .book { color: #7cc4ff; font-weight: bold; }
-        a { color: #7cc4ff; }
-        .status-arb { color: #00ff99; font-weight: bold; }
-        .status-near { color: #ffd54f; font-weight: bold; }
+        body {
+            font-family: Arial, sans-serif;
+            background: #111;
+            color: #fff;
+            padding: 16px;
+            margin: 0;
+        }
+        h1 {
+            text-align: center;
+            margin-bottom: 20px;
+            font-size: 24px;
+        }
+        .card {
+            background: #1b1b1b;
+            padding: 16px;
+            margin: 12px 0;
+            border-radius: 12px;
+            border: 1px solid #2a2a2a;
+        }
+        .subtle {
+            color: #aaa;
+            font-size: 12px;
+            margin-bottom: 6px;
+        }
+        .title {
+            font-size: 18px;
+            font-weight: bold;
+            margin-bottom: 10px;
+        }
+        .line {
+            margin: 6px 0;
+            font-size: 14px;
+        }
+        .book {
+            color: #7cc4ff;
+            font-weight: bold;
+        }
+        .status-arb {
+            color: #00ff99;
+            font-weight: bold;
+        }
+        .status-near {
+            color: #ffd54f;
+            font-weight: bold;
+        }
+        .profit {
+            color: #00ff99;
+            font-weight: bold;
+        }
+        .near {
+            color: #ffd54f;
+            font-weight: bold;
+        }
+        a {
+            color: #7cc4ff;
+            text-decoration: none;
+        }
+        a:hover {
+            text-decoration: underline;
+        }
+        .empty {
+            text-align: center;
+            color: #aaa;
+            margin-top: 40px;
+        }
     </style>
 </head>
 <body>
-    <h1>🏀 NBA Player Points Scanner</h1>
+    <h1>🏀 NBA Player Props Scanner</h1>
 
     {% if arbs %}
         {% for arb in arbs %}
             <div class="card">
                 <div class="subtle">{{ arb.match }}</div>
-                <h3>{{ arb.player }} — {{ arb.line_value }} Points</h3>
+                <div class="title">{{ arb.player }} — {{ arb.line_value }} {{ arb.market_label }}</div>
 
                 <div class="line">
                     <span class="book">Over</span>:
@@ -80,8 +151,8 @@ HTML = """
             </div>
         {% endfor %}
     {% else %}
-        <div class="card">
-            <p>No NBA player points arbs or near arbs found right now.</p>
+        <div class="empty">
+            No NBA prop arbs or near arbs found right now.
         </div>
     {% endif %}
 </body>
@@ -100,23 +171,31 @@ def get_events():
         "bookmakers": ",".join(BOOKMAKERS),
         "oddsFormat": "decimal",
     }
-    response = requests.get(url, params=params, timeout=10)
-    data = response.json()
-    return data if isinstance(data, list) else []
+
+    try:
+        response = requests.get(url, params=params, timeout=10)
+        data = response.json()
+        return data if isinstance(data, list) else []
+    except Exception:
+        return []
 
 def get_event_props(event_id):
     url = f"https://api.the-odds-api.com/v4/sports/{SPORT}/events/{event_id}/odds"
     params = {
         "apiKey": API_KEY,
         "regions": REGIONS,
-        "markets": MARKET,
+        "markets": ",".join(MARKETS),
         "bookmakers": ",".join(BOOKMAKERS),
         "oddsFormat": "decimal",
         "includeLinks": "true",
     }
-    response = requests.get(url, params=params, timeout=10)
-    data = response.json()
-    return data if isinstance(data, dict) else {}
+
+    try:
+        response = requests.get(url, params=params, timeout=15)
+        data = response.json()
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
 
 def calc_split(over_odds, under_odds):
     inv_over = 1 / over_odds
@@ -145,7 +224,8 @@ def process_event(event):
         bookmaker_link = bookmaker.get("link")
 
         for market in bookmaker.get("markets", []):
-            if market.get("key") != MARKET:
+            market_key = market.get("key")
+            if market_key not in MARKETS:
                 continue
 
             market_link = market.get("link")
@@ -157,29 +237,33 @@ def process_event(event):
                 price = outcome.get("price")
                 outcome_link = outcome.get("link")
 
-                if not player or side not in ("Over", "Under") or point is None or not price:
+                if not player or side not in ("Over", "Under") or point is None or price is None:
                     continue
 
                 if price < 1.2 or price > 10:
                     continue
 
-                key = (player, point)
-                if key not in grouped:
-                    grouped[key] = {"Over": None, "Under": None}
+                key = (market_key, player, point)
 
-                current = grouped[key][side]
+                if key not in grouped:
+                    grouped[key] = {
+                        "Over": None,
+                        "Under": None,
+                    }
+
                 candidate = {
                     "price": price,
                     "bookmaker": bookmaker_title,
                     "link": best_link(outcome_link, market_link, bookmaker_link),
                 }
 
+                current = grouped[key][side]
                 if current is None or price > current["price"]:
                     grouped[key][side] = candidate
 
     local_results = []
 
-    for (player, point), sides in grouped.items():
+    for (market_key, player, point), sides in grouped.items():
         over_data = sides["Over"]
         under_data = sides["Under"]
 
@@ -205,6 +289,8 @@ def process_event(event):
                 "match": match_name,
                 "player": player,
                 "line_value": point,
+                "market_key": market_key,
+                "market_label": MARKET_LABELS.get(market_key, market_key),
                 "over_odds": over_data["price"],
                 "under_odds": under_data["price"],
                 "over_bookmaker": over_data["bookmaker"],
@@ -236,6 +322,8 @@ def scan_all():
 
     for t in threads:
         t.join()
+
+    results.sort(key=lambda x: x["profit_pct"], reverse=True)
 
 @app.route("/")
 def home():
