@@ -59,21 +59,25 @@ def fetch_sport(sport):
     try:
         data = requests.get(url, params=params, timeout=5).json()
 
+        if not isinstance(data, list):
+            return
+
         for event in data:
             best_odds = {}
 
-            for bookmaker in event.get('bookmakers', []):
-                for market in bookmaker.get('markets', []):
-                    for outcome in market.get('outcomes', []):
-                        name = outcome['name']
-                        price = outcome['price']
+            for bookmaker in event.get("bookmakers", []):
+                for market in bookmaker.get("markets", []):
+                    for outcome in market.get("outcomes", []):
+                        name = outcome["name"]
+                        price = outcome["price"]
 
                         if name not in best_odds or price > best_odds[name]:
                             best_odds[name] = price
 
-                  if len(best_odds) == 2:
+            if len(best_odds) == 2:
                 odds = list(best_odds.values())
 
+                # Filter bad odds
                 if any(o < 1.2 or o > 20 for o in odds):
                     continue
 
@@ -82,6 +86,7 @@ def fetch_sport(sport):
                 if total < 0.99:
                     profit = round((1 - total) * 100, 2)
 
+                    # Filter unrealistic profit
                     if profit < 1 or profit > 10:
                         continue
 
@@ -93,7 +98,7 @@ def fetch_sport(sport):
                             "profit": profit
                         })
 
-    except:
+    except Exception:
         pass
 
 def scan_all():
