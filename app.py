@@ -90,6 +90,10 @@ HTML = """
             color: #ffd54f;
             font-weight: bold;
         }
+        .status-best {
+            color: #7cc4ff;
+            font-weight: bold;
+        }
         .profit {
             color: #00ff99;
             font-weight: bold;
@@ -97,6 +101,16 @@ HTML = """
         .near {
             color: #ffd54f;
             font-weight: bold;
+        }
+        .value {
+            color: #7cc4ff;
+            font-weight: bold;
+        }
+        .other-prices {
+            color: #cfcfcf;
+            font-size: 13px;
+            margin-top: 6px;
+            line-height: 1.5;
         }
         a {
             color: #7cc4ff;
@@ -119,40 +133,56 @@ HTML = """
         {% for arb in arbs %}
             <div class="card">
                 <div class="subtle">{{ arb.match }}</div>
-                <div class="title">{{ arb.player }} — {{ arb.line_value }} {{ arb.market_label }}</div>
+                <div class="title">{{ arb.player }} — {{ arb.side }} {{ arb.line_value }} {{ arb.market_label }}</div>
 
                 <div class="line">
-                    <span class="book">Over</span>:
-                    {{ arb.over_odds }} at {{ arb.over_bookmaker }}
-                    {% if arb.over_link %}
-                        — <a href="{{ arb.over_link }}" target="_blank">Open</a>
+                    <span class="book">Best odds</span>:
+                    {{ arb.best_odds }} at {{ arb.best_bookmaker }}
+                    {% if arb.best_link %}
+                        — <a href="{{ arb.best_link }}" target="_blank">Open</a>
                     {% endif %}
                 </div>
 
-                <div class="line">
-                    <span class="book">Under</span>:
-                    {{ arb.under_odds }} at {{ arb.under_bookmaker }}
-                    {% if arb.under_link %}
-                        — <a href="{{ arb.under_link }}" target="_blank">Open</a>
-                    {% endif %}
-                </div>
+                {% if arb.other_prices %}
+                    <div class="other-prices">
+                        Other prices: {{ arb.other_prices }}
+                    </div>
+                {% endif %}
 
                 {% if arb.status == "ARB" %}
                     <div class="line status-arb">Status: ARB</div>
+                    <div class="line">
+                        Opposite side: {{ arb.opposite_odds }} at {{ arb.opposite_bookmaker }}
+                        {% if arb.opposite_link %}
+                            — <a href="{{ arb.opposite_link }}" target="_blank">Open</a>
+                        {% endif %}
+                    </div>
                     <div class="line profit">Margin: {{ arb.profit_pct }}%</div>
-                {% else %}
+                    <div class="line">
+                        Bet split: This side {{ arb.this_side_bet_pct }}% / Opposite side {{ arb.opposite_side_bet_pct }}%
+                    </div>
+                {% elif arb.status == "NEAR ARB" %}
                     <div class="line status-near">Status: NEAR ARB</div>
+                    <div class="line">
+                        Opposite side: {{ arb.opposite_odds }} at {{ arb.opposite_bookmaker }}
+                        {% if arb.opposite_link %}
+                            — <a href="{{ arb.opposite_link }}" target="_blank">Open</a>
+                        {% endif %}
+                    </div>
                     <div class="line near">Margin: {{ arb.profit_pct }}%</div>
+                    <div class="line">
+                        Bet split: This side {{ arb.this_side_bet_pct }}% / Opposite side {{ arb.opposite_side_bet_pct }}%
+                    </div>
+                {% else %}
+                    <div class="line status-best">Status: BEST PRICE</div>
+                    <div class="line value">Edge vs market average: {{ arb.edge_vs_avg }}%</div>
+                    <div class="line">Market average: {{ arb.market_average }}</div>
                 {% endif %}
-
-                <div class="line">
-                    Bet split: Over {{ arb.over_bet_pct }}% / Under {{ arb.under_bet_pct }}%
-                </div>
             </div>
         {% endfor %}
     {% else %}
         <div class="empty">
-            No NBA prop arbs or near arbs found right now.
+            No NBA player prop data found right now.
         </div>
     {% endif %}
 </body>
@@ -197,16 +227,16 @@ def get_event_props(event_id):
     except Exception:
         return {}
 
-def calc_split(over_odds, under_odds):
-    inv_over = 1 / over_odds
-    inv_under = 1 / under_odds
-    total = inv_over + inv_under
+def calc_split(this_odds, opposite_odds):
+    inv_this = 1 / this_odds
+    inv_opp = 1 / opposite_odds
+    total = inv_this + inv_opp
 
-    over_pct = round((inv_over / total) * 100, 2)
-    under_pct = round((inv_under / total) * 100, 2)
+    this_pct = round((inv_this / total) * 100, 2)
+    opp_pct = round((inv_opp / total) * 100, 2)
     profit_pct = round((1 - total) * 100, 2)
 
-    return over_pct, under_pct, profit_pct, total
+    return this_pct, opp_pct, profit_pct, total
 
 def process_event(event):
     event_id = event.get("id")
@@ -243,40 +273,76 @@ def process_event(event):
                 if price < 1.2 or price > 10:
                     continue
 
-                key = (market_key, player, point)
+                key = (market_key, player, point, side)
 
                 if key not in grouped:
-                    grouped[key] = {
-                        "Over": None,
-                        "Under": None,
-                    }
+                    grouped[key] = []
 
-                candidate = {
+                grouped[key].append({
                     "price": price,
                     "bookmaker": bookmaker_title,
                     "link": best_link(outcome_link, market_link, bookmaker_link),
-                }
-
-                current = grouped[key][side]
-                if current is None or price > current["price"]:
-                    grouped[key][side] = candidate
+                })
 
     local_results = []
 
-    for (market_key, player, point), sides in grouped.items():
-        over_data = sides["Over"]
-        under_data = sides["Under"]
+    processed_pairs = set()
 
-        if not over_data or not under_data:
+    # BEST PRICE VIEW FOR EACH SIDE
+    for (market_key, player, point, side), offers in grouped.items():
+        if len(offers) == 0:
             continue
 
-        if over_data["bookmaker"] == under_data["bookmaker"]:
+        sorted_offers = sorted(offers, key=lambda x: x["price"], reverse=True)
+        best_offer = sorted_offers[0]
+
+        all_prices = [offer["price"] for offer in offers]
+        market_average = round(sum(all_prices) / len(all_prices), 3)
+        edge_vs_avg = round(((best_offer["price"] / market_average) - 1) * 100, 2) if market_average > 0 else 0
+
+        other_prices = []
+        for offer in sorted_offers[1:]:
+            other_prices.append(f"{offer['bookmaker']} {offer['price']}")
+
+        local_results.append({
+            "match": match_name,
+            "player": player,
+            "line_value": point,
+            "market_label": MARKET_LABELS.get(market_key, market_key),
+            "side": side,
+            "best_odds": best_offer["price"],
+            "best_bookmaker": best_offer["bookmaker"],
+            "best_link": best_offer["link"],
+            "other_prices": ", ".join(other_prices) if other_prices else "",
+            "market_average": market_average,
+            "edge_vs_avg": edge_vs_avg,
+            "status": "BEST PRICE",
+            "profit_pct": edge_vs_avg,
+            "opposite_odds": None,
+            "opposite_bookmaker": None,
+            "opposite_link": None,
+            "this_side_bet_pct": None,
+            "opposite_side_bet_pct": None,
+        })
+
+        # ARB / NEAR ARB CHECK
+        pair_key = (market_key, player, point)
+        if pair_key in processed_pairs:
             continue
 
-        over_pct, under_pct, profit_pct, total = calc_split(
-            over_data["price"],
-            under_data["price"]
-        )
+        over_offers = grouped.get((market_key, player, point, "Over"), [])
+        under_offers = grouped.get((market_key, player, point, "Under"), [])
+
+        if not over_offers or not under_offers:
+            continue
+
+        best_over = sorted(over_offers, key=lambda x: x["price"], reverse=True)[0]
+        best_under = sorted(under_offers, key=lambda x: x["price"], reverse=True)[0]
+
+        if best_over["bookmaker"] == best_under["bookmaker"]:
+            continue
+
+        this_pct, opp_pct, profit_pct, total = calc_split(best_over["price"], best_under["price"])
 
         status = None
         if total < 1:
@@ -289,24 +355,48 @@ def process_event(event):
                 "match": match_name,
                 "player": player,
                 "line_value": point,
-                "market_key": market_key,
                 "market_label": MARKET_LABELS.get(market_key, market_key),
-                "over_odds": over_data["price"],
-                "under_odds": under_data["price"],
-                "over_bookmaker": over_data["bookmaker"],
-                "under_bookmaker": under_data["bookmaker"],
-                "over_link": over_data["link"],
-                "under_link": under_data["link"],
-                "over_bet_pct": over_pct,
-                "under_bet_pct": under_pct,
-                "profit_pct": round(profit_pct, 2),
+                "side": "Over",
+                "best_odds": best_over["price"],
+                "best_bookmaker": best_over["bookmaker"],
+                "best_link": best_over["link"],
+                "other_prices": ", ".join([f"{o['bookmaker']} {o['price']}" for o in sorted(over_offers, key=lambda x: x["price"], reverse=True)[1:]]),
+                "market_average": None,
+                "edge_vs_avg": None,
                 "status": status,
+                "profit_pct": round(profit_pct, 2),
+                "opposite_odds": best_under["price"],
+                "opposite_bookmaker": best_under["bookmaker"],
+                "opposite_link": best_under["link"],
+                "this_side_bet_pct": this_pct,
+                "opposite_side_bet_pct": opp_pct,
             })
 
-    local_results.sort(key=lambda x: x["profit_pct"], reverse=True)
+        processed_pairs.add(pair_key)
 
     with lock:
         results.extend(local_results)
+
+def dedupe_results(items):
+    seen = set()
+    deduped = []
+
+    for item in items:
+        key = (
+            item["match"],
+            item["player"],
+            item["market_label"],
+            item["line_value"],
+            item["side"],
+            item["status"],
+            item["best_bookmaker"],
+            item["best_odds"],
+        )
+        if key not in seen:
+            seen.add(key)
+            deduped.append(item)
+
+    return deduped
 
 def scan_all():
     global results
@@ -323,7 +413,10 @@ def scan_all():
     for t in threads:
         t.join()
 
-    results.sort(key=lambda x: x["profit_pct"], reverse=True)
+    results = dedupe_results(results)
+
+    status_order = {"ARB": 0, "NEAR ARB": 1, "BEST PRICE": 2}
+    results.sort(key=lambda x: (status_order.get(x["status"], 3), -(x["profit_pct"] or 0)))
 
 @app.route("/")
 def home():
