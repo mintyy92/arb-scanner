@@ -8,9 +8,6 @@ app = Flask(__name__)
 API_KEY = os.environ.get("ODDS_API_KEY")
 REGIONS = "au"
 
-if bookmaker_title.lower() not in ["sportsbet", "pointsbet", "ladbrokes", "neds"]:
-    continue
-
 SPORTS = [
     ("basketball_nba", "NBA"),
     ("australianrules_afl", "AFL"),
@@ -158,6 +155,12 @@ HTML = """
 </html>
 """
 
+ALLOWED_BOOKS = ["sportsbet", "pointsbet", "ladbrokes", "neds"]
+
+def is_allowed_bookmaker(title: str) -> bool:
+    title = title.lower()
+    return any(book in title for book in ALLOWED_BOOKS)
+
 def calc_split(this_odds, opposite_odds):
     inv_this = 1 / this_odds
     inv_opp = 1 / opposite_odds
@@ -166,15 +169,16 @@ def calc_split(this_odds, opposite_odds):
     this_pct = round((inv_this / total) * 100, 2)
     opp_pct = round((inv_opp / total) * 100, 2)
     profit_pct = round((1 - total) * 100, 2)
+
     return this_pct, opp_pct, profit_pct, total
 
-def build_display_name(market_key, side, point, outcome_name):
+def build_display_name(market_key, outcome_name, point):
     if market_key == "h2h":
         return f"H2H — {outcome_name}"
     if market_key == "spreads":
-        return f"Spread — {outcome_name} {point:+}"
+        return f"Spread — {outcome_name} {point:+g}"
     if market_key == "totals":
-        return f"Total — {side} {point}"
+        return f"Total — {outcome_name} {point:g}"
     return f"{market_key} — {outcome_name}"
 
 def get_odds_for_sport(sport_key):
@@ -183,7 +187,6 @@ def get_odds_for_sport(sport_key):
         "apiKey": API_KEY,
         "regions": REGIONS,
         "markets": ",".join(MARKETS),
-        "bookmakers": ",".join(BOOKMAKERS),
         "oddsFormat": "decimal",
     }
 
@@ -200,10 +203,15 @@ def process_sport(sport_key, sport_label):
 
     for event in events:
         match_name = f"{event.get('away_team', 'Away')} vs {event.get('home_team', 'Home')}"
+
         grouped = {}
+        market_presence = {"h2h": set(), "totals": set(), "spreads": set()}
 
         for bookmaker in event.get("bookmakers", []):
             bookmaker_title = bookmaker.get("title", bookmaker.get("key", "Unknown"))
+
+            if not is_allowed_bookmaker(bookmaker_title):
+                continue
 
             for market in bookmaker.get("markets", []):
                 market_key = market.get("key")
@@ -211,64 +219,67 @@ def process_sport(sport_key, sport_label):
                     continue
 
                 for outcome in market.get("outcomes", []):
-                    price = outcome.get("price")
                     name = outcome.get("name")
+                    price = outcome.get("price")
                     point = outcome.get("point")
 
-                    if price is None or name is None:
+                    if name is None or price is None:
                         continue
 
                     if price < 1.01 or price > 20:
                         continue
 
                     if market_key == "h2h":
-                        side_key = name
-                    elif market_key == "spreads":
-                        side_key = f"{name}|{point}"
+                        key = ("h2h", name, None)
+                        market_presence["h2h"].add(name)
                     elif market_key == "totals":
-                        side_key = f"{name}|{point}"
+                        if point is None:
+                            continue
+                        point = float(point)
+                        key = ("totals", name, point)
+                        market_presence["totals"].add(point)
+                    elif market_key == "spreads":
+                        if point is None:
+                            continue
+                        point = float(point)
+                        key = ("spreads", name, point)
+                        market_presence["spreads"].add((name, point))
                     else:
                         continue
 
-                    key = (market_key, side_key)
                     if key not in grouped:
                         grouped[key] = []
 
                     grouped[key].append({
-                        "price": price,
+                        "price": float(price),
                         "bookmaker": bookmaker_title,
                         "name": name,
                         "point": point,
                     })
 
-        processed_pairs = set()
-
-        for (market_key, side_key), offers in grouped.items():
+        # BEST PRICE CARDS
+        for (market_key, name, point), offers in grouped.items():
             if not offers:
                 continue
 
             sorted_offers = sorted(offers, key=lambda x: x["price"], reverse=True)
             best_offer = sorted_offers[0]
 
-            all_prices = [offer["price"] for offer in offers]
-            market_average = round(sum(all_prices) / len(all_prices), 3)
+            prices = [offer["price"] for offer in offers]
+            market_average = round(sum(prices) / len(prices), 3)
             edge_vs_avg = round(((best_offer["price"] / market_average) - 1) * 100, 2) if market_average > 0 else 0
 
-            other_prices = [f"{offer['bookmaker']} {offer['price']}" for offer in sorted_offers[1:]]
-
-            # always add best price card
-            if market_key == "h2h":
-                side = best_offer["name"]
-            else:
-                side = best_offer["name"]
+            other_prices = ", ".join(
+                [f"{offer['bookmaker']} {offer['price']}" for offer in sorted_offers[1:]]
+            )
 
             local_results.append({
                 "sport_label": sport_label,
                 "match": match_name,
-                "display_name": build_display_name(market_key, side, best_offer["point"], best_offer["name"]),
+                "display_name": build_display_name(market_key, name, point),
                 "best_odds": best_offer["price"],
                 "best_bookmaker": best_offer["bookmaker"],
-                "other_prices": ", ".join(other_prices),
+                "other_prices": other_prices,
                 "market_average": market_average,
                 "edge_vs_avg": edge_vs_avg,
                 "status": "BEST PRICE",
@@ -280,89 +291,118 @@ def process_sport(sport_key, sport_label):
                 "opposite_side_bet_pct": None,
             })
 
-            # arb / near-arb logic
-            if market_key == "h2h":
-                outcomes = [o.get("name") for o in event.get("bookmakers", [])[0].get("markets", []) if False]
-                # build opposite from event teams
-                possible = []
-                for key2, offers2 in grouped.items():
-                    mk2, sk2 = key2
-                    if mk2 != "h2h" or sk2 == side_key:
-                        continue
-                    possible.append((key2, offers2))
+        # ARB / NEAR ARB — H2H
+        h2h_keys = [key for key in grouped.keys() if key[0] == "h2h"]
+        if len(h2h_keys) == 2:
+            key1, key2 = h2h_keys
+            best1 = sorted(grouped[key1], key=lambda x: x["price"], reverse=True)[0]
+            best2 = sorted(grouped[key2], key=lambda x: x["price"], reverse=True)[0]
 
-                if possible:
-                    opp_key, opp_offers = possible[0]
-                    best_opp = sorted(opp_offers, key=lambda x: x["price"], reverse=True)[0]
+            if best1["bookmaker"] != best2["bookmaker"]:
+                this_pct, opp_pct, profit_pct, total = calc_split(best1["price"], best2["price"])
+                status = "ARB" if total < 1 else "NEAR ARB" if total <= 1.02 else None
 
-                    if best_offer["bookmaker"] != best_opp["bookmaker"]:
-                        this_pct, opp_pct, profit_pct, total = calc_split(best_offer["price"], best_opp["price"])
-                        status = "ARB" if total < 1 else "NEAR ARB" if total <= 1.02 else None
+                if status:
+                    local_results.append({
+                        "sport_label": sport_label,
+                        "match": match_name,
+                        "display_name": f"H2H Arb — {key1[1]} / {key2[1]}",
+                        "best_odds": best1["price"],
+                        "best_bookmaker": best1["bookmaker"],
+                        "other_prices": "",
+                        "market_average": None,
+                        "edge_vs_avg": None,
+                        "status": status,
+                        "profit_pct": round(profit_pct, 2),
+                        "opposite_label": key2[1],
+                        "opposite_odds": best2["price"],
+                        "opposite_bookmaker": best2["bookmaker"],
+                        "this_side_bet_pct": this_pct,
+                        "opposite_side_bet_pct": opp_pct,
+                    })
 
-                        if status:
-                            local_results.append({
-                                "sport_label": sport_label,
-                                "match": match_name,
-                                "display_name": build_display_name(market_key, best_offer["name"], best_offer["point"], best_offer["name"]),
-                                "best_odds": best_offer["price"],
-                                "best_bookmaker": best_offer["bookmaker"],
-                                "other_prices": ", ".join(other_prices),
-                                "market_average": None,
-                                "edge_vs_avg": None,
-                                "status": status,
-                                "profit_pct": round(profit_pct, 2),
-                                "opposite_label": best_opp["name"],
-                                "opposite_odds": best_opp["price"],
-                                "opposite_bookmaker": best_opp["bookmaker"],
-                                "this_side_bet_pct": this_pct,
-                                "opposite_side_bet_pct": opp_pct,
-                            })
+        # ARB / NEAR ARB — TOTALS
+        checked_totals = set()
+        for point in market_presence["totals"]:
+            if point in checked_totals:
+                continue
 
-            elif market_key in ("spreads", "totals"):
-                if side_key in processed_pairs:
-                    continue
+            over_key = ("totals", "Over", point)
+            under_key = ("totals", "Under", point)
 
-                side_name, point = side_key.split("|")
-                opposite_name = "Under" if side_name == "Over" else "Over" if side_name == "Under" else None
+            if over_key in grouped and under_key in grouped:
+                best_over = sorted(grouped[over_key], key=lambda x: x["price"], reverse=True)[0]
+                best_under = sorted(grouped[under_key], key=lambda x: x["price"], reverse=True)[0]
 
-                if market_key == "spreads":
-                    try:
-                        opp_point = str(float(point) * -1)
-                    except Exception:
-                        continue
-                    opposite_key = (market_key, f"{event.get('home_team') if best_offer['name']==event.get('away_team') else event.get('away_team')}|{opp_point}")
-                else:
-                    opposite_key = (market_key, f"{opposite_name}|{point}")
+                if best_over["bookmaker"] != best_under["bookmaker"]:
+                    this_pct, opp_pct, profit_pct, total = calc_split(best_over["price"], best_under["price"])
+                    status = "ARB" if total < 1 else "NEAR ARB" if total <= 1.02 else None
 
-                opp_offers = grouped.get(opposite_key, [])
-                if opp_offers:
-                    best_opp = sorted(opp_offers, key=lambda x: x["price"], reverse=True)[0]
+                    if status:
+                        local_results.append({
+                            "sport_label": sport_label,
+                            "match": match_name,
+                            "display_name": f"Total Arb — {point:g}",
+                            "best_odds": best_over["price"],
+                            "best_bookmaker": best_over["bookmaker"],
+                            "other_prices": "",
+                            "market_average": None,
+                            "edge_vs_avg": None,
+                            "status": status,
+                            "profit_pct": round(profit_pct, 2),
+                            "opposite_label": f"Under {point:g}",
+                            "opposite_odds": best_under["price"],
+                            "opposite_bookmaker": best_under["bookmaker"],
+                            "this_side_bet_pct": this_pct,
+                            "opposite_side_bet_pct": opp_pct,
+                        })
 
-                    if best_offer["bookmaker"] != best_opp["bookmaker"]:
-                        this_pct, opp_pct, profit_pct, total = calc_split(best_offer["price"], best_opp["price"])
-                        status = "ARB" if total < 1 else "NEAR ARB" if total <= 1.02 else None
+            checked_totals.add(point)
 
-                        if status:
-                            local_results.append({
-                                "sport_label": sport_label,
-                                "match": match_name,
-                                "display_name": build_display_name(market_key, best_offer["name"], best_offer["point"], best_offer["name"]),
-                                "best_odds": best_offer["price"],
-                                "best_bookmaker": best_offer["bookmaker"],
-                                "other_prices": ", ".join(other_prices),
-                                "market_average": None,
-                                "edge_vs_avg": None,
-                                "status": status,
-                                "profit_pct": round(profit_pct, 2),
-                                "opposite_label": build_display_name(market_key, best_opp["name"], best_opp["point"], best_opp["name"]),
-                                "opposite_odds": best_opp["price"],
-                                "opposite_bookmaker": best_opp["bookmaker"],
-                                "this_side_bet_pct": this_pct,
-                                "opposite_side_bet_pct": opp_pct,
-                            })
+        # ARB / NEAR ARB — SPREADS
+        checked_spreads = set()
+        for (market_key, name, point), offers in list(grouped.items()):
+            if market_key != "spreads":
+                continue
 
-                processed_pairs.add(side_key)
-                processed_pairs.add(opposite_key[1] if isinstance(opposite_key, tuple) else opposite_key)
+            pair_id = tuple(sorted([(name, point), ("opp", -point)]))
+            if pair_id in checked_spreads:
+                continue
+
+            opposite_key = None
+            for (mk, opp_name, opp_point) in grouped.keys():
+                if mk == "spreads" and opp_name != name and opp_point == -point:
+                    opposite_key = (mk, opp_name, opp_point)
+                    break
+
+            if opposite_key and (market_key, name, point) in grouped:
+                best_a = sorted(grouped[(market_key, name, point)], key=lambda x: x["price"], reverse=True)[0]
+                best_b = sorted(grouped[opposite_key], key=lambda x: x["price"], reverse=True)[0]
+
+                if best_a["bookmaker"] != best_b["bookmaker"]:
+                    this_pct, opp_pct, profit_pct, total = calc_split(best_a["price"], best_b["price"])
+                    status = "ARB" if total < 1 else "NEAR ARB" if total <= 1.02 else None
+
+                    if status:
+                        local_results.append({
+                            "sport_label": sport_label,
+                            "match": match_name,
+                            "display_name": f"Spread Arb — {name} {point:+g} / {opposite_key[1]} {opposite_key[2]:+g}",
+                            "best_odds": best_a["price"],
+                            "best_bookmaker": best_a["bookmaker"],
+                            "other_prices": "",
+                            "market_average": None,
+                            "edge_vs_avg": None,
+                            "status": status,
+                            "profit_pct": round(profit_pct, 2),
+                            "opposite_label": f"{opposite_key[1]} {opposite_key[2]:+g}",
+                            "opposite_odds": best_b["price"],
+                            "opposite_bookmaker": best_b["bookmaker"],
+                            "this_side_bet_pct": this_pct,
+                            "opposite_side_bet_pct": opp_pct,
+                        })
+
+            checked_spreads.add(pair_id)
 
     with lock:
         results.extend(local_results)
@@ -400,6 +440,7 @@ def scan_all():
         t.join()
 
     results = dedupe_results(results)
+
     status_order = {"ARB": 0, "NEAR ARB": 1, "BEST PRICE": 2}
     results.sort(key=lambda x: (status_order.get(x["status"], 3), -(x["profit_pct"] or 0)))
 
