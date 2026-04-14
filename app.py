@@ -71,12 +71,19 @@ def fetch_sport(sport):
                         if name not in best_odds or price > best_odds[name]:
                             best_odds[name] = price
 
-            if len(best_odds) == 2:
+                  if len(best_odds) == 2:
                 odds = list(best_odds.values())
+
+                if any(o < 1.2 or o > 20 for o in odds):
+                    continue
+
                 total = (1 / odds[0]) + (1 / odds[1])
 
-                if total < 0.98:
+                if total < 0.99:
                     profit = round((1 - total) * 100, 2)
+
+                    if profit < 1 or profit > 10:
+                        continue
 
                     with lock:
                         results.append({
